@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { setOptions, importLibrary } from '@googlemaps/js-api-loader'
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string
-type Permission = 'prompt' | 'granted' | 'denied'
 
 function metersToYards(m: number): number {
   return m / 0.9144
@@ -44,7 +43,6 @@ export default function MapTab() {
   const [locationError, setLocationError] = useState<string | null>(null)
   const [hasLocation, setHasLocation] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [permission, setPermission] = useState<Permission>('prompt')
 
   // ── Build or move the dashed line ──────────────────────────────────────────
   const updateLine = useCallback((
@@ -141,6 +139,58 @@ export default function MapTab() {
       })
 
       mapRef.current = map
+
+      // ── Geolocation ──────────────────────────────────────────────────────────
+      if (!('geolocation' in navigator)) {
+        setLocationError('Geolocation is not supported by this browser.')
+        return
+      }
+
+      watchIdRef.current = navigator.geolocation.watchPosition(
+        (pos) => {
+          const { latitude: lat, longitude: lng } = pos.coords
+          userPosRef.current = { lat, lng }
+          setHasLocation(true)
+          setLocationError(null)
+
+          if (userMarkerRef.current) {
+            userMarkerRef.current.setPosition({ lat, lng })
+          } else {
+            // Blue pulsing dot — classic Marker with SVG icon, no Map ID needed
+            const svgDot = encodeURIComponent(
+              '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
+              + '<circle cx="11" cy="11" r="8" fill="#3b82f6" stroke="#ffffff" stroke-width="2.5"/>'
+              + '</svg>',
+            )
+            userMarkerRef.current = new google.maps.Marker({
+              map,
+              position: { lat, lng },
+              icon: {
+                url: `data:image/svg+xml,${svgDot}`,
+                scaledSize: new google.maps.Size(22, 22),
+                anchor: new google.maps.Point(11, 11),
+              },
+              title: 'You',
+              zIndex: 10,
+            })
+            map.setCenter({ lat, lng })
+            map.setZoom(17)
+          }
+
+          if (targetMarkerRef.current) {
+            const tPos = targetMarkerRef.current.getPosition()
+            if (tPos) updateLine(map, { lat, lng }, { lat: tPos.lat(), lng: tPos.lng() })
+          }
+        },
+        (err) => {
+          setLocationError(
+            err.code === err.PERMISSION_DENIED
+              ? 'Location access denied. Enable it in browser settings.'
+              : 'Unable to get your location.',
+          )
+        },
+        { enableHighAccuracy: true, maximumAge: 1500 },
+      )
     }).catch(() => {
       setLoadError('Failed to load Google Maps. Check your API key and network.')
     })
@@ -159,72 +209,6 @@ export default function MapTab() {
     }
   }, [placeTarget, updateLine])
 
-  const startLocationTracking = useCallback(() => {
-    if (!('geolocation' in navigator)) {
-      setPermission('denied')
-      setLocationError('Geolocation is not supported by this browser.')
-      return
-    }
-
-    if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current)
-      watchIdRef.current = null
-    }
-
-    setLocationError(null)
-
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        const map = mapRef.current
-        if (!map) return
-
-        const { latitude: lat, longitude: lng } = pos.coords
-        userPosRef.current = { lat, lng }
-        setHasLocation(true)
-        setPermission('granted')
-        setLocationError(null)
-
-        if (userMarkerRef.current) {
-          userMarkerRef.current.setPosition({ lat, lng })
-        } else {
-          const svgDot = encodeURIComponent(
-            '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
-            + '<circle cx="11" cy="11" r="8" fill="#3b82f6" stroke="#ffffff" stroke-width="2.5"/>'
-            + '</svg>',
-          )
-          userMarkerRef.current = new google.maps.Marker({
-            map,
-            position: { lat, lng },
-            icon: {
-              url: `data:image/svg+xml,${svgDot}`,
-              scaledSize: new google.maps.Size(22, 22),
-              anchor: new google.maps.Point(11, 11),
-            },
-            title: 'You',
-            zIndex: 10,
-          })
-          map.setCenter({ lat, lng })
-          map.setZoom(17)
-        }
-
-        if (targetMarkerRef.current) {
-          const tPos = targetMarkerRef.current.getPosition()
-          if (tPos) updateLine(map, { lat, lng }, { lat: tPos.lat(), lng: tPos.lng() })
-        }
-      },
-      (err) => {
-        setHasLocation(false)
-        setPermission(err.code === err.PERMISSION_DENIED ? 'denied' : 'prompt')
-        setLocationError(
-          err.code === err.PERMISSION_DENIED
-            ? 'Location access denied. Enable it in your browser settings.'
-            : 'Unable to get your location. Try again.',
-        )
-      },
-      { enableHighAccuracy: true, maximumAge: 1500 },
-    )
-  }, [updateLine])
-
   const centerOnUser = useCallback(() => {
     if (mapRef.current && userPosRef.current) {
       mapRef.current.panTo(userPosRef.current)
@@ -239,35 +223,6 @@ export default function MapTab() {
     lineRef.current = null
     setDistance(null)
   }, [])
-
-  function PermissionCard({
-    title,
-    body,
-    action,
-  }: {
-    title: string
-    body: string
-    action?: { label: string; onClick: () => void }
-  }) {
-    return (
-      <div
-        className="rounded-[24px] p-6 flex flex-col gap-3"
-        style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.08)' }}
-      >
-        <span className="text-base font-bold text-white">{title}</span>
-        <span className="text-sm leading-relaxed" style={{ color: 'rgba(255,255,255,0.7)' }}>{body}</span>
-        {action && (
-          <button
-            className="mt-1 py-3.5 rounded-[18px] text-sm font-bold text-black"
-            style={{ background: 'rgb(227,237,230)' }}
-            onClick={action.onClick}
-          >
-            {action.label}
-          </button>
-        )}
-      </div>
-    )
-  }
 
   // ── Error screen ───────────────────────────────────────────────────────────
   if (loadError) {
@@ -289,36 +244,6 @@ export default function MapTab() {
             VITE_GOOGLE_MAPS_API_KEY=...
           </code>
         </div>
-      </div>
-    )
-  }
-
-  if (permission === 'prompt') {
-    return (
-      <div
-        className="flex-1 flex items-center justify-center p-6"
-        style={{ background: 'linear-gradient(135deg,rgb(20,28,20),rgb(46,54,46))' }}
-      >
-        <PermissionCard
-          title="Location Access"
-          body="The map needs your current location to place your position and measure distance to the target."
-          action={{ label: 'Enable Location', onClick: startLocationTracking }}
-        />
-      </div>
-    )
-  }
-
-  if (permission === 'denied' && !hasLocation) {
-    return (
-      <div
-        className="flex-1 flex items-center justify-center p-6"
-        style={{ background: 'linear-gradient(135deg,rgb(20,28,20),rgb(46,54,46))' }}
-      >
-        <PermissionCard
-          title="Location Unavailable"
-          body={locationError ?? 'Location access is denied or restricted. Enable it in your browser settings to use the map.'}
-          action={{ label: 'Try Again', onClick: startLocationTracking }}
-        />
       </div>
     )
   }
