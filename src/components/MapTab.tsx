@@ -1,29 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
+import { setOptions, importLibrary } from '@googlemaps/js-api-loader'
 
-// Custom SVG marker icons (avoids bundling Leaflet's PNG assets)
-const userIcon = L.divIcon({
-  html: `<div style="
-    width:16px;height:16px;border-radius:50%;
-    background:#3b82f6;border:2.5px solid #fff;
-    box-shadow:0 2px 8px rgba(0,0,0,0.4);
-  "></div>`,
-  className: '',
-  iconSize: [16, 16],
-  iconAnchor: [8, 8],
-})
-
-const targetIcon = L.divIcon({
-  html: `<svg viewBox="0 0 24 32" width="24" height="32" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 2 C6,2 2,7 2,12 C2,19 12,30 12,30 C12,30 22,19 22,12 C22,7 18,2 12,2 Z"
-      fill="rgba(235,245,224,0.92)" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/>
-    <circle cx="12" cy="12" r="4" fill="rgba(0,0,0,0.25)"/>
-  </svg>`,
-  className: '',
-  iconSize: [24, 32],
-  iconAnchor: [12, 30],
-})
+const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string
 
 function metersToYards(m: number): number {
   return m / 0.9144
@@ -37,134 +15,240 @@ function formatDistance(meters: number): string {
   return `${Math.round(meters)} m · ${yards} yd`
 }
 
+function haversineMeters(
+  lat1: number, lng1: number,
+  lat2: number, lng2: number,
+): number {
+  const R = 6371000
+  const toRad = (d: number) => (d * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
 export default function MapTab() {
   const mapDivRef = useRef<HTMLDivElement>(null)
-  const mapRef = useRef<L.Map | null>(null)
-  const userMarkerRef = useRef<L.Marker | null>(null)
-  const targetMarkerRef = useRef<L.Marker | null>(null)
-  const lineRef = useRef<L.Polyline | null>(null)
+  const mapRef = useRef<google.maps.Map | null>(null)
+  // Use classic Marker — AdvancedMarkerElement requires a registered Cloud Map ID
+  const userMarkerRef = useRef<google.maps.Marker | null>(null)
+  const targetMarkerRef = useRef<google.maps.Marker | null>(null)
+  const lineRef = useRef<google.maps.Polyline | null>(null)
   const watchIdRef = useRef<number | null>(null)
+  const userPosRef = useRef<{ lat: number; lng: number } | null>(null)
 
   const [distance, setDistance] = useState<number | null>(null)
   const [locationError, setLocationError] = useState<string | null>(null)
   const [hasLocation, setHasLocation] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
+  // ── Build or move the dashed line ──────────────────────────────────────────
+  const updateLine = useCallback((
+    map: google.maps.Map,
+    from: { lat: number; lng: number },
+    to: { lat: number; lng: number },
+  ) => {
+    const path = [from, to]
+    if (lineRef.current) {
+      lineRef.current.setPath(path)
+    } else {
+      lineRef.current = new google.maps.Polyline({
+        path,
+        map,
+        strokeColor: 'rgba(235,245,224,0.85)',
+        strokeOpacity: 0,
+        icons: [{
+          icon: {
+            path: 'M 0,-1 0,1',
+            strokeOpacity: 0.85,
+            strokeColor: '#ebf5e0',
+            scale: 3,
+          },
+          offset: '0',
+          repeat: '14px',
+        }],
+      })
+    }
+    setDistance(haversineMeters(from.lat, from.lng, to.lat, to.lng))
+  }, [])
+
+  // ── Place or move target marker ────────────────────────────────────────────
+  const placeTarget = useCallback((
+    map: google.maps.Map,
+    latLng: google.maps.LatLng,
+  ) => {
+    const pos = { lat: latLng.lat(), lng: latLng.lng() }
+
+    if (targetMarkerRef.current) {
+      targetMarkerRef.current.setPosition(latLng)
+    } else {
+      targetMarkerRef.current = new google.maps.Marker({
+        map,
+        position: latLng,
+        icon: {
+          url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
+            <svg viewBox="0 0 24 32" width="28" height="36" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 2 C6,2 2,7 2,12 C2,19 12,30 12,30 C12,30 22,19 22,12 C22,7 18,2 12,2 Z"
+                fill="rgba(235,245,224,0.95)" stroke="rgba(0,0,0,0.35)" stroke-width="1.5"/>
+              <circle cx="12" cy="12" r="4" fill="rgba(0,0,0,0.25)"/>
+            </svg>`)}`,
+          scaledSize: new google.maps.Size(28, 36),
+          anchor: new google.maps.Point(14, 34),
+        },
+        title: 'Target',
+        cursor: 'pointer',
+      })
+    }
+
+    if (userPosRef.current) {
+      updateLine(map, userPosRef.current, pos)
+    }
+  }, [updateLine])
+
+  // ── Load Google Maps and initialize ────────────────────────────────────────
   useEffect(() => {
     if (!mapDivRef.current || mapRef.current) return
 
-    const map = L.map(mapDivRef.current, {
-      center: [37.7749, -122.4194],
-      zoom: 15,
-      zoomControl: false,
-      attributionControl: false,
-    })
-
-    // Satellite imagery
-    L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 19 },
-    ).addTo(map)
-
-    // Minimal attribution
-    L.control.attribution({ position: 'bottomleft', prefix: '' }).addTo(map)
-    map.attributionControl?.addAttribution('© Esri')
-
-    // Scale bar
-    L.control.scale({ imperial: true, metric: true, position: 'bottomright' }).addTo(map)
-
-    // Tap to place target
-    map.on('click', (e) => {
-      const { lat, lng } = e.latlng
-
-      if (targetMarkerRef.current) {
-        targetMarkerRef.current.setLatLng([lat, lng])
-      } else {
-        targetMarkerRef.current = L.marker([lat, lng], { icon: targetIcon }).addTo(map)
-      }
-
-      if (userMarkerRef.current) {
-        const uLatLng = userMarkerRef.current.getLatLng()
-        const dist = map.distance(uLatLng, [lat, lng])
-        setDistance(dist)
-
-        if (lineRef.current) {
-          lineRef.current.setLatLngs([uLatLng, [lat, lng]])
-        } else {
-          lineRef.current = L.polyline([uLatLng, [lat, lng]], {
-            color: 'rgba(235,245,224,0.75)',
-            weight: 2,
-            dashArray: '6 8',
-          }).addTo(map)
-        }
-      }
-    })
-
-    mapRef.current = map
-
-    // Geolocation
-    if (!('geolocation' in navigator)) {
-      setLocationError('Geolocation is not supported by this browser.')
+    if (!API_KEY || API_KEY === 'YOUR_API_KEY_HERE') {
+      setLoadError('Add your Google Maps API key to .env.local → VITE_GOOGLE_MAPS_API_KEY')
       return
     }
 
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        const { latitude: lat, longitude: lng } = pos.coords
-        setHasLocation(true)
-        setLocationError(null)
+    setOptions({ key: API_KEY, v: 'weekly' })
 
-        const latLng: L.LatLngTuple = [lat, lng]
+    Promise.all([
+      importLibrary('core'),
+      importLibrary('maps'),
+    ]).then(([, mapsLib]) => {
+      const { Map } = mapsLib as google.maps.MapsLibrary
 
-        if (userMarkerRef.current) {
-          userMarkerRef.current.setLatLng(latLng)
-        } else {
-          userMarkerRef.current = L.marker(latLng, { icon: userIcon }).addTo(map)
-          map.setView(latLng, 17)
-        }
+      const map = new Map(mapDivRef.current!, {
+        center: { lat: 37.7749, lng: -122.4194 },
+        zoom: 16,
+        mapTypeId: 'satellite',
+        tilt: 0,
+        disableDefaultUI: true,
+        clickableIcons: false,
+      })
 
-        if (targetMarkerRef.current) {
-          const tLatLng = targetMarkerRef.current.getLatLng()
-          const dist = map.distance(latLng, tLatLng)
-          setDistance(dist)
-          lineRef.current?.setLatLngs([latLng, tLatLng])
-        }
-      },
-      (err) => {
-        setLocationError(
-          err.code === err.PERMISSION_DENIED
-            ? 'Location access denied. Enable it in browser settings.'
-            : 'Unable to get your location.',
-        )
-      },
-      { enableHighAccuracy: true, maximumAge: 1500 },
-    )
+      // Tap to place target
+      map.addListener('click', (e: google.maps.MapMouseEvent) => {
+        if (e.latLng) placeTarget(map, e.latLng)
+      })
+
+      mapRef.current = map
+
+      // ── Geolocation ──────────────────────────────────────────────────────────
+      if (!('geolocation' in navigator)) {
+        setLocationError('Geolocation is not supported by this browser.')
+        return
+      }
+
+      watchIdRef.current = navigator.geolocation.watchPosition(
+        (pos) => {
+          const { latitude: lat, longitude: lng } = pos.coords
+          userPosRef.current = { lat, lng }
+          setHasLocation(true)
+          setLocationError(null)
+
+          if (userMarkerRef.current) {
+            userMarkerRef.current.setPosition({ lat, lng })
+          } else {
+            // Blue pulsing dot — classic Marker with SVG icon, no Map ID needed
+            const svgDot = encodeURIComponent(
+              '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
+              + '<circle cx="11" cy="11" r="8" fill="#3b82f6" stroke="#ffffff" stroke-width="2.5"/>'
+              + '</svg>',
+            )
+            userMarkerRef.current = new google.maps.Marker({
+              map,
+              position: { lat, lng },
+              icon: {
+                url: `data:image/svg+xml,${svgDot}`,
+                scaledSize: new google.maps.Size(22, 22),
+                anchor: new google.maps.Point(11, 11),
+              },
+              title: 'You',
+              zIndex: 10,
+            })
+            map.setCenter({ lat, lng })
+            map.setZoom(17)
+          }
+
+          if (targetMarkerRef.current) {
+            const tPos = targetMarkerRef.current.getPosition()
+            if (tPos) updateLine(map, { lat, lng }, { lat: tPos.lat(), lng: tPos.lng() })
+          }
+        },
+        (err) => {
+          setLocationError(
+            err.code === err.PERMISSION_DENIED
+              ? 'Location access denied. Enable it in browser settings.'
+              : 'Unable to get your location.',
+          )
+        },
+        { enableHighAccuracy: true, maximumAge: 1500 },
+      )
+    }).catch(() => {
+      setLoadError('Failed to load Google Maps. Check your API key and network.')
+    })
 
     return () => {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current)
       }
-      map.remove()
-      mapRef.current = null
-      userMarkerRef.current = null
-      targetMarkerRef.current = null
+      lineRef.current?.setMap(null)
       lineRef.current = null
+      userMarkerRef.current?.setMap(null)
+      userMarkerRef.current = null
+      targetMarkerRef.current?.setMap(null)
+      targetMarkerRef.current = null
+      mapRef.current = null
     }
-  }, [])
+  }, [placeTarget, updateLine])
 
   const centerOnUser = useCallback(() => {
-    if (mapRef.current && userMarkerRef.current) {
-      mapRef.current.setView(userMarkerRef.current.getLatLng(), 17, { animate: true })
+    if (mapRef.current && userPosRef.current) {
+      mapRef.current.panTo(userPosRef.current)
+      mapRef.current.setZoom(17)
     }
   }, [])
 
   const clearTarget = useCallback(() => {
-    targetMarkerRef.current?.remove()
+    targetMarkerRef.current?.setMap(null)
     targetMarkerRef.current = null
-    lineRef.current?.remove()
+    lineRef.current?.setMap(null)
     lineRef.current = null
     setDistance(null)
   }, [])
 
+  // ── Error screen ───────────────────────────────────────────────────────────
+  if (loadError) {
+    return (
+      <div
+        className="flex-1 flex items-center justify-center p-6"
+        style={{ background: 'linear-gradient(135deg,rgb(20,28,20),rgb(46,54,46))' }}
+      >
+        <div
+          className="rounded-[24px] p-6 flex flex-col gap-3"
+          style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.08)' }}
+        >
+          <span className="text-base font-bold text-white">Map Unavailable</span>
+          <span className="text-sm" style={{ color: 'rgba(255,255,255,0.7)' }}>{loadError}</span>
+          <code
+            className="text-xs px-3 py-2 rounded-xl mt-1"
+            style={{ background: 'rgba(0,0,0,0.3)', color: 'rgba(235,245,224,0.8)' }}
+          >
+            VITE_GOOGLE_MAPS_API_KEY=...
+          </code>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Main map view ──────────────────────────────────────────────────────────
   return (
     <div className="flex-1 relative overflow-hidden">
       <div ref={mapDivRef} className="absolute inset-0" />
@@ -174,8 +258,8 @@ export default function MapTab() {
         <div
           className="absolute bottom-4 left-4 right-4 flex items-center justify-between px-4 py-3 rounded-2xl"
           style={{
-            background: 'rgba(8,12,8,0.80)',
-            backdropFilter: 'blur(12px)',
+            background: 'rgba(8,12,8,0.82)',
+            backdropFilter: 'blur(14px)',
             border: '1px solid rgba(255,255,255,0.1)',
           }}
         >
@@ -195,13 +279,13 @@ export default function MapTab() {
         </div>
       )}
 
-      {/* Location error banner */}
+      {/* Location error */}
       {locationError && (
         <div
           className="absolute top-4 left-4 right-14 px-4 py-3 rounded-2xl text-sm"
           style={{
-            background: 'rgba(8,12,8,0.80)',
-            backdropFilter: 'blur(12px)',
+            background: 'rgba(8,12,8,0.82)',
+            backdropFilter: 'blur(14px)',
             border: '1px solid rgba(255,255,255,0.1)',
             color: 'rgba(255,255,255,0.78)',
           }}
@@ -215,8 +299,8 @@ export default function MapTab() {
         onClick={centerOnUser}
         className="absolute top-4 right-4 w-10 h-10 rounded-full flex items-center justify-center"
         style={{
-          background: 'rgba(8,12,8,0.75)',
-          backdropFilter: 'blur(12px)',
+          background: 'rgba(8,12,8,0.78)',
+          backdropFilter: 'blur(14px)',
           border: '1px solid rgba(255,255,255,0.12)',
           color: hasLocation ? 'rgba(235,245,224,0.9)' : 'rgba(255,255,255,0.4)',
         }}
@@ -231,13 +315,13 @@ export default function MapTab() {
         </svg>
       </button>
 
-      {/* Hint (shown when no target placed yet) */}
+      {/* Tap hint */}
       {distance === null && !locationError && (
         <div
           className="absolute top-4 left-4 right-14 px-3 py-2.5 rounded-xl text-xs"
           style={{
             background: 'rgba(8,12,8,0.75)',
-            backdropFilter: 'blur(12px)',
+            backdropFilter: 'blur(14px)',
             border: '1px solid rgba(255,255,255,0.1)',
             color: 'rgba(255,255,255,0.7)',
           }}

@@ -1,5 +1,10 @@
 {
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "framework": "vite"
+  "framework": "vite",
+  "build": {
+    "env": {
+      "VITE_GOOGLE_MAPS_API_KEY": "@vite-google-maps-api-key"
+    }
+  }
 }

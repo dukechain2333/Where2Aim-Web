@@ -198,13 +198,10 @@ export default function ScopeTab({ active }: { active: boolean }) {
       <div className="absolute inset-0 pointer-events-none" style={{ border: '1px solid rgba(255,255,255,0.14)' }} />
 
       {/* Reticle overlay */}
-      <div className="absolute inset-0 flex flex-col pointer-events-none">
-        {/* Top spacer ~14% of height */}
-        <div style={{ height: containerH * 0.14, flexShrink: 0 }} />
-
+      <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
         {/* Range lines row — centred, max 320 px wide */}
         <div
-          className="flex items-end mx-auto"
+          className="flex items-end"
           style={{ width: Math.min(320, containerH * 0.55), height: reticleRowH }}
         >
           {DISTANCES.map(dist => {
