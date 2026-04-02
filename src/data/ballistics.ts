@@ -48,5 +48,5 @@ export function getRecommendation(
   const zd = closest(zeroDistYds, ZERO_DISTANCES)
   const td = closest(distanceYds, DISTANCES)
   const impact = trajectoryData[oh]?.[zd]?.[td] ?? 0
-  return { impactOffsetInches: impact, holdOffsetInches: -impact }
+  return { impactOffsetInches: impact, holdOffsetInches: impact }
 }

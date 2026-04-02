@@ -74,7 +74,7 @@ function USPSATarget({
   const aimX = tX + aimOffset.x * (tW / 2 - 8)
   const aimY = tTop + tH * 0.54 + aimOffset.y * (tH * 0.38)
 
-  // Hit dot (green) — offset upward by hold amount
+  // Hit dot (green) — move upward when the recommended hold is positive
   const hitX = aimX
   const hitY = aimY - holdOffsetInches * pixelsPerInch
 
